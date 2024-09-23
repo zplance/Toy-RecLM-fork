@@ -600,3 +600,82 @@ class HSTU_SASRec(nn.Module):
         logits = item_embs.matmul(final_feat.unsqueeze(-1)).squeeze(-1)
 
         return logits
+
+
+class DeepFM(nn.Module):
+    def __init__(self, field_dims, embed_dim, mlp_dims, dropout):
+        """
+        DeepFM model that combines Factorization Machine (FM) and deep neural network for feature interactions.
+        
+        Args:
+            field_dims (list of int): The size of each categorical field, representing the number of unique values in each field.
+            embed_dim (int): The dimensionality of the embedding vectors for each field.
+            mlp_dims (list of int): The number of units in each layer of the deep neural network.
+            dropout (float): Dropout rate to be applied in the deep part.
+        """
+        super(DeepFM, self).__init__()
+
+        # Factorization Machine Part
+        self.embedding = nn.Embedding(sum(field_dims), embed_dim)  # Embeddings for FM and Deep part
+        self.embed_output_dim = len(field_dims) * embed_dim
+
+        # First-order linear part for FM
+        self.linear = nn.Embedding(sum(field_dims), 1)
+
+        # Deep Component (MLP)
+        layers = []
+        input_dim = self.embed_output_dim
+        for mlp_dim in mlp_dims:
+            layers.append(nn.Linear(input_dim, mlp_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(p=dropout))
+            input_dim = mlp_dim
+        self.mlp = nn.Sequential(*layers)
+
+        # Output layer
+        self.output_layer = nn.Linear(mlp_dims[-1] + 1 + embed_dim, 1)
+
+    def fm_interaction(self, x):
+        """
+        Factorization machine interaction layer to capture pairwise feature interactions.
+        
+        Args:
+            x (torch.Tensor): Input embeddings of shape (batch_size, num_fields, embed_dim).
+        
+        Returns:
+            torch.Tensor: Interaction terms of FM, scalar value.
+        """
+        square_of_sum = torch.sum(x, dim=1) ** 2
+        sum_of_square = torch.sum(x ** 2, dim=1)
+        interaction = 0.5 * torch.sum(square_of_sum - sum_of_square, dim=1, keepdim=True)
+        return interaction
+
+    def forward(self, x):
+        """
+        Forward pass of the DeepFM model.
+        
+        Args:
+            x (torch.Tensor): Input tensor containing indices of categorical features.
+        
+        Returns:
+            torch.Tensor: Output prediction, scalar value.
+        """
+        # Linear part (First-order interactions)
+        linear_part = torch.sum(self.linear(x), dim=1)
+
+        # Embedding lookup for deep part and FM part
+        embeddings = self.embedding(x)
+
+        # FM part (Second-order interactions)
+        fm_part = self.fm_interaction(embeddings)
+
+        # Deep part (MLP on the embeddings)
+        deep_part = self.mlp(embeddings.view(embeddings.size(0), -1))
+
+        # Concatenate FM and Deep parts, and linear part
+        concat_input = torch.cat([linear_part, fm_part, deep_part], dim=1)
+
+        # Final output layer
+        output = torch.sigmoid(self.output_layer(concat_input)).squeeze(1)
+
+        return output
